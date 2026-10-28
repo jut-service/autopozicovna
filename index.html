@@ -104,8 +104,51 @@ const defaultCars=[
 {id:2,name:'BMW X5',category:'SUV',price:99,gear:'Automat',seats:5,fuel:'Diesel',image:'https://images.unsplash.com/photo-1555215695-3004980ad54e?auto=format&fit=crop&w=900&q=80',description:'Prémiové SUV s dostatkom priestoru.'},
 {id:3,name:'Mercedes-Benz E-Class',category:'Luxusná',price:119,gear:'Automat',seats:5,fuel:'Diesel',image:'https://images.unsplash.com/photo-1618843479313-40f8afb4b4d8?auto=format&fit=crop&w=900&q=80',description:'Elegantný komfort na pracovné aj súkromné cesty.'}
 ];
+// Google Apps Script – vzdialené úložisko. Skript musí byť nasadený ako webová aplikácia
+// s prístupom „Ktokoľvek“ a musí podporovať JSON akcie {action:"load",key} a
+// {action:"save",key,value}. Lokálne úložisko zostáva ako záloha pre prípad výpadku.
+const GOOGLE_STORAGE_URL='https://script.google.com/macros/s/AKfycbwFoI7YNaV3A0wYFeAYT7NShGUrlO3IHH-QsNUu1y--vrGKHyfiIborFk6to-5Tym7w/exec';
+const CLOUD_KEYS=['users','cars','bookings','resetRequests','session','contactInfo'];
 function load(k,f){try{let x=localStorage.getItem('autopoz_'+k);return x?JSON.parse(x):f}catch(e){return f}}
-function save(k,v){try{localStorage.setItem('autopoz_'+k,JSON.stringify(v))}catch(e){}}
+let cloudSaveQueue=Promise.resolve();
+function save(k,v){
+  try{localStorage.setItem('autopoz_'+k,JSON.stringify(v))}catch(e){}
+  if(!CLOUD_KEYS.includes(k))return;
+  // text/plain predchádza CORS preflightu pri Apps Script web aplikáciách.
+  cloudSaveQueue=cloudSaveQueue.then(()=>fetch(GOOGLE_STORAGE_URL,{
+    method:'POST',mode:'no-cors',redirect:'follow',
+    headers:{'Content-Type':'text/plain;charset=utf-8'},
+    body:JSON.stringify({action:'save',key:k,value:v})
+  })).catch(err=>console.warn('Cloud uloženie sa nepodarilo:',err));
+}
+async function loadCloudData(){
+  // Serverové dáta sa načítajú, ak endpoint vráti JSON vo formáte {value: ...}
+  // alebo priamo hodnotu. Ak načítanie zlyhá, používa sa lokálna kópia.
+  for(const k of CLOUD_KEYS){
+    try{
+      const response=await fetch(GOOGLE_STORAGE_URL+'?action=load&key='+encodeURIComponent(k),{method:'GET',redirect:'follow'});
+      if(!response.ok)continue;
+      const data=await response.json();
+      const value=data&&Object.prototype.hasOwnProperty.call(data,'value')?data.value:data;
+      if(value!==undefined&&value!==null){
+        localStorage.setItem('autopoz_'+k,JSON.stringify(value));
+        if(k==='users')users=value;
+        else if(k==='cars')cars=value;
+        else if(k==='bookings')bookings=value;
+        else if(k==='resetRequests')resetRequests=value;
+        else if(k==='session')session=value;
+        else if(k==='contactInfo')contactInfo=value;
+      }
+    }catch(err){console.warn('Cloud načítanie ('+k+') sa nepodarilo; používajú sa lokálne dáta.',err)}
+  }
+  if(!users.some(u=>u.role==='admin'))users.unshift(DEMO_ADMIN);
+  renderPublicContact();
+  if(session){
+    const u=users.find(x=>x.id===session.id);
+    if(!u||u.status!=='approved'&&u.role!=='admin'){session=null;save('session',null)}
+    else{session={id:u.id,email:u.email,name:u.name,role:u.role,status:u.status};save('session',session);go(u.role==='admin'?'admin':'customer')}
+  }
+}
 let users=load('users',[DEMO_ADMIN]),cars=load('cars',defaultCars),bookings=load('bookings',[]),resetRequests=load('resetRequests',[]),session=load('session',null),month=new Date(),availabilityRange=null;
 let contactInfo=load('contactInfo',{phone:'+421',email:'',address:'',hours:'',social:''});
 if(!users.some(u=>u.role==='admin'))users.unshift(DEMO_ADMIN);
@@ -165,5 +208,6 @@ document.getElementById('year').textContent=new Date().getFullYear();renderPubli
 // Native date pickers prevent selecting past dates and keep return date after pickup.
 (function setupDatePickers(){const start=document.getElementById('availabilityStart'),end=document.getElementById('availabilityEnd');if(!start||!end)return;const today=new Date();const localToday=`${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;start.min=localToday;end.min=start.value||localToday;start.addEventListener('change',()=>{end.min=start.value||localToday;if(end.value&&end.value<=start.value)end.value='';availabilityRange=null;});end.addEventListener('change',()=>{availabilityRange=null;});})();
 if(session){const u=users.find(x=>x.id===session.id);if(!u||u.status!=='approved'&&u.role!=='admin'){session=null;save('session',null)}else{session={id:u.id,email:u.email,name:u.name,role:u.role,status:u.status};save('session',session);go(u.role==='admin'?'admin':'customer')}}
+loadCloudData();
 </script>
 </body></html>
