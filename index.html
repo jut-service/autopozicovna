@@ -97,6 +97,7 @@ body{background:#e7e7e7;color:#252525}header{background:rgba(231,231,231,.96)}
 <div class="field fullfield"><label for="carService">Dostupnosť vozidla</label><select id="carService"><option value="available">Dostupné na prenájom</option><option value="service">Momentálne v servise – nedostupné</option></select></div><div class="field fullfield"><label for="carDesc">Popis</label><input id="carDesc" placeholder="Krátky popis vozidla"></div></div><div class="modalactions"><button type="button" class="btn outline" onclick="closeModal()">Zrušiť</button><button class="btn primary" type="submit">Uložiť</button></div></form></div></div>
 <div id="bookingModalBg" class="modalbg" onclick="if(event.target===this)closeBookingModal()"><div class="modal"><h2>Nová rezervácia (admin)</h2><form onsubmit="saveBooking(event)"><div class="field"><label for="bookingUser">Zákazník</label><select id="bookingUser" required></select></div><div class="field"><label for="bookingCar">Vozidlo</label><select id="bookingCar" required></select></div><div class="grid2"><div class="field"><label for="bookingStart">Od</label><input id="bookingStart" type="date" required></div><div class="field"><label for="bookingEnd">Do</label><input id="bookingEnd" type="date" required></div></div><div class="modalactions"><button type="button" class="btn outline" onclick="closeBookingModal()">Zrušiť</button><button class="btn primary" type="submit">Vytvoriť</button></div></form></div></div>
 <div id="toast" class="toast"></div>
+<script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
 <script>
 const DEMO_ADMIN={name:'Administrátor',email:'admin@autopozicovna.sk',password:'Admin123',role:'admin',status:'approved'};
 const defaultCars=[
@@ -110,37 +111,45 @@ const defaultCars=[
 const GOOGLE_STORAGE_URL='https://script.google.com/macros/s/AKfycbwFoI7YNaV3A0wYFeAYT7NShGUrlO3IHH-QsNUu1y--vrGKHyfiIborFk6to-5Tym7w/exec';
 const CLOUD_KEYS=['users','cars','bookings','resetRequests','session','contactInfo'];
 function load(k,f){try{let x=localStorage.getItem('autopoz_'+k);return x?JSON.parse(x):f}catch(e){return f}}
-let cloudSaveQueue=Promise.resolve();
+// Rýchlejšia synchronizácia: lokálne uloženie je okamžité, cloudové zápisy sa
+// krátko zlučujú podľa kľúča a vzdialené údaje sa načítajú súbežne.
+const cloudSaveTimers=Object.create(null);
+const cloudPendingValues=Object.create(null);
+const CLOUD_SAVE_DELAY=250;
 function save(k,v){
-  try{localStorage.setItem('autopoz_'+k,JSON.stringify(v))}catch(e){}
+  try{localStorage.setItem('autopoz_'+k,JSON.stringify(v))}catch(e){console.warn('Lokálne uloženie sa nepodarilo:',e)}
   if(!CLOUD_KEYS.includes(k))return;
-  // text/plain predchádza CORS preflightu pri Apps Script web aplikáciách.
-  cloudSaveQueue=cloudSaveQueue.then(()=>fetch(GOOGLE_STORAGE_URL,{
-    method:'POST',mode:'no-cors',redirect:'follow',
-    headers:{'Content-Type':'text/plain;charset=utf-8'},
-    body:JSON.stringify({action:'save',key:k,value:v})
-  })).catch(err=>console.warn('Cloud uloženie sa nepodarilo:',err));
+  cloudPendingValues[k]=v;
+  if(cloudSaveTimers[k])clearTimeout(cloudSaveTimers[k]);
+  cloudSaveTimers[k]=setTimeout(()=>{
+    const value=cloudPendingValues[k];
+    delete cloudPendingValues[k];
+    delete cloudSaveTimers[k];
+    fetch(GOOGLE_STORAGE_URL,{
+      method:'POST',mode:'no-cors',redirect:'follow',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body:JSON.stringify({action:'save',key:k,value})
+    }).catch(err=>console.warn('Cloud uloženie ('+k+') sa nepodarilo:',err));
+  },CLOUD_SAVE_DELAY);
 }
 async function loadCloudData(){
-  // Serverové dáta sa načítajú, ak endpoint vráti JSON vo formáte {value: ...}
-  // alebo priamo hodnotu. Ak načítanie zlyhá, používa sa lokálna kópia.
-  for(const k of CLOUD_KEYS){
+  // Nečakáme na každú položku zvlášť; všetky kľúče sa načítajú paralelne.
+  await Promise.all(CLOUD_KEYS.map(async k=>{
     try{
-      const response=await fetch(GOOGLE_STORAGE_URL+'?action=load&key='+encodeURIComponent(k),{method:'GET',redirect:'follow'});
-      if(!response.ok)continue;
+      const response=await fetch(GOOGLE_STORAGE_URL+'?action=load&key='+encodeURIComponent(k),{method:'GET',redirect:'follow',cache:'no-store'});
+      if(!response.ok) return;
       const data=await response.json();
       const value=data&&Object.prototype.hasOwnProperty.call(data,'value')?data.value:data;
-      if(value!==undefined&&value!==null){
-        localStorage.setItem('autopoz_'+k,JSON.stringify(value));
-        if(k==='users')users=value;
-        else if(k==='cars')cars=value;
-        else if(k==='bookings')bookings=value;
-        else if(k==='resetRequests')resetRequests=value;
-        else if(k==='session')session=value;
-        else if(k==='contactInfo')contactInfo=value;
-      }
+      if(value===undefined||value===null)return;
+      localStorage.setItem('autopoz_'+k,JSON.stringify(value));
+      if(k==='users')users=value;
+      else if(k==='cars')cars=value;
+      else if(k==='bookings')bookings=value;
+      else if(k==='resetRequests')resetRequests=value;
+      else if(k==='session')session=value;
+      else if(k==='contactInfo')contactInfo=value;
     }catch(err){console.warn('Cloud načítanie ('+k+') sa nepodarilo; používajú sa lokálne dáta.',err)}
-  }
+  }));
   if(!users.some(u=>u.role==='admin'))users.unshift(DEMO_ADMIN);
   users.filter(u=>u.role==='admin'&&u.email===DEMO_ADMIN.email).forEach(u=>u.password='Admin123');
   renderPublicContact();
@@ -195,7 +204,8 @@ function userStatus(id,status){const u=users.find(x=>x.id===id);if(u){u.status=s
 function editCar(id){const c=cars.find(x=>x.id===id);document.getElementById('carForm').reset();document.getElementById('carImagePreview').style.display='none';document.getElementById('carImagePreview').innerHTML='';document.getElementById('carId').value=c?.id||'';document.getElementById('modalTitle').textContent=c?'Upraviť vozidlo':'Pridať vozidlo';if(c){document.getElementById('carName').value=c.name;document.getElementById('carPlate').value=c.licensePlate||'';document.getElementById('carCategory').value=c.category;document.getElementById('carPrice').value=c.price;document.getElementById('carGear').value=c.gear;document.getElementById('carSeats').value=c.seats;document.getElementById('carFuel').value=c.fuel;document.getElementById('carImage').value=c.image||'';document.getElementById('carDesc').value=c.description||'';document.getElementById('carService').value=c.service?'service':'available';const ims=c.images&&c.images.length?c.images:[c.image].filter(Boolean);if(ims.length){document.getElementById('carImagePreview').innerHTML=ims.map(src=>`<img src="${esc(src)}" alt="Náhľad">`).join('');document.getElementById('carImagePreview').style.display='grid'}}else{document.getElementById('carPrice').value=40;document.getElementById('carSeats').value=5}document.getElementById('modalBg').classList.add('show')}
 function closeModal(){document.getElementById('modalBg').classList.remove('show')}
 function readImageData(file){return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(new Error('Obrázok sa nepodarilo načítať.'));reader.readAsDataURL(file)})}
-async function prepareCarImage(file){if(!file.type.startsWith('image/'))throw new Error('Vyberte iba obrázky.');if(file.size>10*1024*1024)throw new Error('Každý obrázok môže mať najviac 10 MB.');const data=await readImageData(file);if(file.size<=2*1024*1024)return data;return new Promise((resolve,reject)=>{const img=new Image();img.onload=()=>{try{const maxW=1600,maxH=1200,scale=Math.min(1,maxW/img.width,maxH/img.height),canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(img.width*scale));canvas.height=Math.max(1,Math.round(img.height*scale));const ctx=canvas.getContext('2d');ctx.drawImage(img,0,0,canvas.width,canvas.height);resolve(canvas.toDataURL('image/jpeg',0.78))}catch(e){reject(new Error('Obrázok sa nepodarilo upraviť.'))}};img.onerror=()=>reject(new Error('Tento formát obrázka sa nepodarilo spracovať.'));img.src=data})}
+async function convertHeicFile(file){const isHeic=/\.(heic|heif)$/i.test(file.name)||/image\/(heic|heif)/i.test(file.type);if(!isHeic)return file;if(typeof window.heic2any!=='function')throw new Error('Konvertor HEIC sa nenačítal. Pripojte sa na internet alebo fotku preveďte na JPG.');try{const converted=await window.heic2any({blob:file,toType:'image/jpeg',quality:0.86});const blob=Array.isArray(converted)?converted[0]:converted;return new File([blob],file.name.replace(/\.(heic|heif)$/i,'.jpg'),{type:'image/jpeg',lastModified:Date.now()})}catch(e){throw new Error('Fotku HEIC sa nepodarilo previesť. Skúste ju uložiť ako JPG.')}}
+async function prepareCarImage(originalFile){if(originalFile.size>10*1024*1024)throw new Error('Každý obrázok môže mať najviac 10 MB.');const file=await convertHeicFile(originalFile);if(!file.type.startsWith('image/'))throw new Error('Vyberte iba obrázky.');const data=await readImageData(file);if(file.size<=2*1024*1024)return data;return new Promise((resolve,reject)=>{const img=new Image();img.onload=()=>{try{const maxW=1600,maxH=1200,scale=Math.min(1,maxW/img.width,maxH/img.height),canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(img.width*scale));canvas.height=Math.max(1,Math.round(img.height*scale));const ctx=canvas.getContext('2d');ctx.drawImage(img,0,0,canvas.width,canvas.height);resolve(canvas.toDataURL('image/jpeg',0.78))}catch(e){reject(new Error('Obrázok sa nepodarilo upraviť.'))}};img.onerror=()=>reject(new Error('Tento formát obrázka sa nepodarilo spracovať.'));img.src=data})}
 async function saveCar(e){e.preventDefault();if(session?.role!=='admin')return;const id=Number(document.getElementById('carId').value)||Date.now(),existing=cars.find(x=>x.id===id);let images=existing?.images||[];const files=Array.from(document.getElementById('carImageFiles').files||[]);if(files.length){try{images=await Promise.all(files.map(prepareCarImage))}catch(err){toast(err.message||'Obrázky sa nepodarilo načítať.');return}}const image=document.getElementById('carImage').value.trim();if(!images.length&&image)images=[image];const c={id,name:document.getElementById('carName').value.trim(),licensePlate:document.getElementById('carPlate').value.trim(),category:document.getElementById('carCategory').value,price:Number(document.getElementById('carPrice').value),gear:document.getElementById('carGear').value,seats:Number(document.getElementById('carSeats').value),fuel:document.getElementById('carFuel').value,image:image||images[0]||'',images,service:document.getElementById('carService').value==='service',reserved:!!existing?.reserved,description:document.getElementById('carDesc').value.trim()};const i=cars.findIndex(x=>x.id===id);if(i<0)cars.push(c);else cars[i]=c;try{localStorage.setItem('autopoz_cars',JSON.stringify(cars))}catch(err){toast('Fotografie sú príliš veľké na uloženie v prehliadači. Skúste menej obrázkov alebo menšie súbory.');return}closeModal();renderAdmin();toast('Vozidlo bolo uložené.')}
 function toggleCarService(id){if(session?.role!=='admin')return;const c=cars.find(x=>x.id===id);if(!c)return;c.service=!c.service;save('cars',cars);renderAdmin();toast(c.service?'Vozidlo je označené ako v servise.':'Vozidlo je opäť dostupné.')}
 function toggleCarReserved(id){if(session?.role!=='admin')return;const c=cars.find(x=>x.id===id);if(!c)return;c.reserved=!c.reserved;save('cars',cars);renderAdmin();if(session?.role==='customer')renderCustomer();toast(c.reserved?'Vozidlo je označené ako rezervované a zákazníkom sa už nezobrazuje.':'Vozidlo je opäť dostupné zákazníkom.')}
@@ -211,7 +221,7 @@ function closeBookingModal(){document.getElementById('bookingModalBg').classList
 function saveBooking(e){e.preventDefault();const u=users.find(x=>x.id===Number(document.getElementById('bookingUser').value)),carId=Number(document.getElementById('bookingCar').value),start=document.getElementById('bookingStart').value,end=document.getElementById('bookingEnd').value;if(end<=start){toast('Dátum do musí byť po dátume od.');return}if(bookings.some(b=>b.carId===carId&&['Schválená','Čaká na schválenie'].includes(b.status)&&start<b.end&&end>b.start)){toast('Termín koliduje so schválenou rezerváciou.');return}const car=cars.find(c=>c.id===carId);bookings.push({id:Date.now(),customer:u.name,email:u.email,carId,start,end,status:'Čaká na schválenie',pricePerDay:Number(car?.price||0),discountPercent:0,totalPrice:rentalDays(start,end)*Number(car?.price||0),created:new Date().toISOString()});save('bookings',bookings);closeBookingModal();renderAdmin();toast('Rezervácia bola vytvorená.')}
 function changeMonth(n){month.setMonth(month.getMonth()+n);renderCalendar()}
 function renderCalendar(){const label=document.getElementById('monthLabel');if(!label)return;label.textContent=month.toLocaleDateString('sk-SK',{month:'long',year:'numeric'});const y=month.getFullYear(),m=month.getMonth(),offset=(new Date(y,m,1).getDay()+6)%7,days=new Date(y,m+1,0).getDate(),names=['Po','Ut','St','Št','Pi','So','Ne'];let out=names.map(n=>`<div class="day" style="min-height:auto;background:#e2e2e2"><strong>${n}</strong></div>`).join('');for(let i=0;i<offset;i++)out+='<div class="day"></div>';for(let d=1;d<=days;d++){const date=`${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`,ev=bookings.filter(b=>b.status==='Schválená'&&b.start<=date&&b.end>=date);out+=`<div class="day"><strong>${d}</strong>${ev.map(b=>`<span class="event">${esc(cars.find(c=>c.id===b.carId)?.name||'Vozidlo')}<br>${esc(b.customer)}</span>`).join('')}</div>`}document.getElementById('calendarGrid').innerHTML=out}
-document.getElementById('carImageFiles').addEventListener('change',function(){const box=document.getElementById('carImagePreview');box.innerHTML='';const files=Array.from(this.files||[]);if(!files.length){box.style.display='none';return}box.style.display='grid';files.forEach(file=>{if(!file.type.startsWith('image/')){toast('Vyberte iba obrázky.');return}if(file.size>10*1024*1024){toast('Obrázok '+file.name+' je väčší ako 10 MB.');return}const img=document.createElement('img');img.alt=file.name;img.src=URL.createObjectURL(file);box.appendChild(img)})});
+document.getElementById('carImageFiles').addEventListener('change',async function(){const box=document.getElementById('carImagePreview');box.innerHTML='';const files=Array.from(this.files||[]);if(!files.length){box.style.display='none';return}box.style.display='grid';for(const originalFile of files){if(originalFile.size>10*1024*1024){toast('Obrázok '+originalFile.name+' je väčší ako 10 MB.');continue}try{const file=await convertHeicFile(originalFile);if(!file.type.startsWith('image/')){toast('Vyberte iba obrázky.');continue}const img=document.createElement('img');img.alt=originalFile.name;img.src=URL.createObjectURL(file);box.appendChild(img)}catch(err){toast(err.message||('Fotku '+originalFile.name+' sa nepodarilo načítať.'))}}});
 document.getElementById('year').textContent=new Date().getFullYear();renderPublicContact();
 // Native date pickers prevent selecting past dates and keep return date after pickup.
 (function setupDatePickers(){const start=document.getElementById('availabilityStart'),end=document.getElementById('availabilityEnd');if(!start||!end)return;const today=new Date();const localToday=`${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;start.min=localToday;end.min=start.value||localToday;start.addEventListener('change',()=>{end.min=start.value||localToday;if(end.value&&end.value<=start.value)end.value='';availabilityRange=null;});end.addEventListener('change',()=>{availabilityRange=null;});})();
