@@ -67,6 +67,19 @@ body{background:#e7e7e7;color:#252525}header{background:rgba(231,231,231,.96)}
 .car-status.service{background:#fff0d5;color:#8a4b00}.car-status.available{background:#e0f5e7;color:#176b3a}
 .field input[type=file]{padding:9px}@media(max-width:560px){.car-gallery img{height:85px}}
 </style>
+<style>
+#jutCloudStatus{position:fixed;left:14px;bottom:14px;z-index:40;width:min(360px,calc(100vw - 28px));background:#fff;border:1px solid #cbd5e1;border-radius:10px;box-shadow:0 8px 28px #0f172a22;padding:12px 14px;color:#1e293b;font:13px/1.4 system-ui,sans-serif}
+#jutCloudStatus .jutcs-head{display:flex;align-items:center;gap:8px;font-weight:800;margin-bottom:4px}
+#jutCloudDot{width:9px;height:9px;border-radius:50%;background:#94a3b8;flex:none}
+#jutCloudStatus[data-state="ok"] #jutCloudDot{background:#16a34a}
+#jutCloudStatus[data-state="saving"] #jutCloudDot{background:#d97706}
+#jutCloudStatus[data-state="error"] #jutCloudDot{background:#dc2626}
+#jutCloudStatus .jutcs-detail{color:#475569;overflow-wrap:anywhere}
+#jutCloudStatus .jutcs-actions{display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap}
+#jutCloudStatus button{background:#19375e;color:#fff;border:0;border-radius:5px;padding:6px 9px;font-size:12px;font-weight:700}
+#jutCloudStatus .jutcs-version{font-size:11px;color:#64748b;margin-top:4px}
+@media(max-width:560px){#jutCloudStatus{bottom:8px;left:8px;width:calc(100vw - 16px)}}
+</style>
 </head>
 <body>
 <header><div class="wrap nav"><a class="brand" href="#" onclick="go('home')"><span class="logo">A</span><span>AUTOPOŽIČOVŇA<small>JUT SERVICE</small></span></a><nav class="navlinks"><a href="#sluzby" onclick="go('home')">Služby</a><a href="#kontakt" onclick="go('home')">Kontakt</a><button onclick="go('login')">Prihlásenie</button><button onclick="go('login')">Administrácia</button><button class="btn primary" onclick="go('register')">Vytvoriť účet</button><button id="logoutBtn" style="display:none" onclick="logout()">Odhlásiť sa</button></nav></div></header>
@@ -98,6 +111,12 @@ body{background:#e7e7e7;color:#252525}header{background:rgba(231,231,231,.96)}
 <div class="field fullfield"><label for="carService">Dostupnosť vozidla</label><select id="carService"><option value="available">Dostupné na prenájom</option><option value="service">Momentálne v servise – nedostupné</option></select></div><div class="field fullfield"><label for="carDesc">Popis</label><input id="carDesc" placeholder="Krátky popis vozidla"></div></div><div class="modalactions"><button type="button" class="btn outline" onclick="closeModal()">Zrušiť</button><button class="btn primary" type="submit">Uložiť</button></div></form></div></div>
 <div id="bookingModalBg" class="modalbg" onclick="if(event.target===this)closeBookingModal()"><div class="modal"><h2>Nová rezervácia (admin)</h2><form onsubmit="saveBooking(event)"><div class="field"><label for="bookingUser">Zákazník</label><select id="bookingUser" required></select></div><div class="field"><label for="bookingCar">Vozidlo</label><select id="bookingCar" required></select></div><div class="grid2"><div class="field"><label for="bookingStart">Od</label><input id="bookingStart" type="date" required></div><div class="field"><label for="bookingEnd">Do</label><input id="bookingEnd" type="date" required></div></div><div class="modalactions"><button type="button" class="btn outline" onclick="closeBookingModal()">Zrušiť</button><button class="btn primary" type="submit">Vytvoriť</button></div></form></div></div>
 <div id="toast" class="toast"></div>
+<div id="jutCloudStatus" data-state="checking" role="status" aria-live="polite">
+  <div class="jutcs-head"><span id="jutCloudDot"></span><span id="jutCloudTitle">Kontrolujem online úložisko…</span></div>
+  <div id="jutCloudDetail" class="jutcs-detail">Lokálne zmeny sa ukladajú automaticky.</div>
+  <div id="jutCloudVersion" class="jutcs-version">Verzia úložiska: zatiaľ neoverená</div>
+  <div class="jutcs-actions"><button type="button" onclick="checkCloudStorage()">Overiť úložisko</button><span id="jutCloudPending" class="jutcs-version">Čakajúce zápisy: 0</span></div>
+</div>
 <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
 <script>
 const DEMO_ADMIN={name:'Administrátor',email:'admin@autopozicovna.sk',password:'Admin123',role:'admin',status:'approved'};
@@ -114,28 +133,66 @@ const BACKUP_ACCESS_KEY='JUTservice_Cloud_2026_K7mP9xR4vN2qL8wT5zB1';
 const CLOUD_KEYS=['users','cars','bookings','resetRequests','contactInfo','priceMode'];
 function load(k,f){try{let x=localStorage.getItem('autopoz_'+k);return x?JSON.parse(x):f}catch(e){return f}}
 
-// Uloženie do localStorage je okamžité. Cloudové zápisy sa krátko zlučujú.
+// Uloženie do localStorage je okamžité. Cloudový zápis sa následne overí spätným načítaním.
 const cloudSaveTimers=Object.create(null);
 const cloudPendingValues=Object.create(null);
+const cloudSaveErrors=Object.create(null);
 let cloudWritesInFlight=0;
-const CLOUD_SAVE_DELAY=250;
+let cloudLastSeenAt=null;
+let cloudLastVerifiedAt=null;
+const CLOUD_SAVE_DELAY=300;
+function setCloudStatus(state,title,detail){
+  const box=document.getElementById('jutCloudStatus');
+  if(!box)return;
+  box.dataset.state=state;
+  const t=document.getElementById('jutCloudTitle'); if(t)t.textContent=title;
+  const d=document.getElementById('jutCloudDetail'); if(d)d.textContent=detail||'';
+  const v=document.getElementById('jutCloudVersion');
+  if(v){const stamp=cloudLastSeenAt||cloudLastVerifiedAt;v.textContent='Verzia úložiska: '+(stamp?formatCloudVersion(stamp):'zatiaľ neoverená');}
+  const n=document.getElementById('jutCloudPending');
+  if(n)n.textContent='Čakajúce zápisy: '+(Object.keys(cloudSaveTimers).length+Object.keys(cloudPendingValues).length+cloudWritesInFlight);
+}
+function formatCloudVersion(stamp){try{return new Date(stamp).toLocaleString('sk-SK')}catch(e){return String(stamp)}}
+function updateCloudPending(){const n=document.getElementById('jutCloudPending');if(n)n.textContent='Čakajúce zápisy: '+(Object.keys(cloudSaveTimers).length+Object.keys(cloudPendingValues).length+cloudWritesInFlight)}
 function save(k,v){
-  try{localStorage.setItem('autopoz_'+k,JSON.stringify(v))}catch(e){console.warn('Lokálne úložisko je plné; pokračujem synchronizáciou do cloudu:',e)}
+  try{localStorage.setItem('autopoz_'+k,JSON.stringify(v))}
+  catch(e){console.error('Lokálne úložisko sa nepodarilo zapísať:',e);setCloudStatus('error','Chyba lokálneho uloženia','Prehliadač odmietol uložiť '+k+'. Uvoľni miesto v úložisku.');}
   if(!CLOUD_KEYS.includes(k))return;
   cloudPendingValues[k]=v;
+  delete cloudSaveErrors[k];
   if(cloudSaveTimers[k])clearTimeout(cloudSaveTimers[k]);
-  cloudSaveTimers[k]=setTimeout(()=>{
+  setCloudStatus('saving','Automaticky ukladám…','Zmena „'+k+'“ je uložená lokálne; overujem odoslanie do Google Drive.');
+  cloudSaveTimers[k]=setTimeout(async()=>{
     const value=cloudPendingValues[k];
     delete cloudPendingValues[k];
     delete cloudSaveTimers[k];
-    cloudWritesInFlight++;
-    fetch(GOOGLE_STORAGE_URL,{
-      method:'POST',mode:'no-cors',redirect:'follow',
-      headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body:JSON.stringify({action:'save',backupKey:BACKUP_ACCESS_KEY,key:k,value:value})
-    }).catch(err=>console.warn('Cloud uloženie ('+k+') sa nepodarilo:',err))
-      .finally(()=>{cloudWritesInFlight=Math.max(0,cloudWritesInFlight-1)});
+    cloudWritesInFlight++; updateCloudPending();
+    try{
+      await fetch(GOOGLE_STORAGE_URL,{
+        method:'POST',mode:'no-cors',redirect:'follow',
+        headers:{'Content-Type':'text/plain;charset=utf-8'},
+        body:JSON.stringify({action:'save',backupKey:BACKUP_ACCESS_KEY,key:k,value:value})
+      });
+      // no-cors skryje odpoveď POST-u, preto overíme výsledok načítaním tej istej položky.
+      await new Promise(resolve=>setTimeout(resolve,900));
+      const url=GOOGLE_STORAGE_URL+'?action=load&backupKey='+encodeURIComponent(BACKUP_ACCESS_KEY)+'&key='+encodeURIComponent(k);
+      const data=await loadCloudJsonp(url);
+      if(!data||data.ok===false)throw new Error(data&&data.error?data.error:'Server nevrátil platnú odpoveď.');
+      if(JSON.stringify(data.value)!==JSON.stringify(value))throw new Error('Cloud vrátil inú hodnotu než bola odoslaná. Skontroluj nasadenie Apps Scriptu a jeho kľúč.');
+      cloudLastSeenAt=data.updatedAt||cloudLastSeenAt;
+      cloudLastVerifiedAt=new Date().toISOString();
+      delete cloudSaveErrors[k];
+      setCloudStatus('ok','Automaticky uložené ✓','Cloud potvrdil uloženie položky „'+k+'“.');
+    }catch(err){
+      cloudSaveErrors[k]=String(err&&err.message||err);
+      console.error('Cloud uloženie ('+k+') nebolo overené:',err);
+      setCloudStatus('error','Cloudové uloženie nepotvrdené','Položka „'+k+'“ je zatiaľ len lokálne alebo server neodpovedá. '+cloudSaveErrors[k]);
+    }finally{
+      cloudWritesInFlight=Math.max(0,cloudWritesInFlight-1);updateCloudPending();
+      if(Object.keys(cloudPendingValues).length===0&&Object.keys(cloudSaveTimers).length===0&&cloudWritesInFlight===0&&Object.keys(cloudSaveErrors).length===0){setCloudStatus('ok','Automaticky uložené ✓','Všetky aktuálne cloudové zápisy sú overené.');}
+    }
   },CLOUD_SAVE_DELAY);
+  updateCloudPending();
 }
 
 // Apps Script JSONP načítanie: funguje aj vtedy, keď prehliadač blokuje CORS.
@@ -159,7 +216,6 @@ function loadCloudJsonp(url){
   });
 }
 
-let cloudLastSeenAt=null;
 let cloudPollBusy=false;
 async function loadCloudData(){
   let latestSeen=null;
@@ -264,7 +320,23 @@ document.getElementById('year').textContent=new Date().getFullYear();renderPubli
 // Native date pickers prevent selecting past dates and keep return date after pickup.
 (function setupDatePickers(){const start=document.getElementById('availabilityStart'),end=document.getElementById('availabilityEnd');if(!start||!end)return;const today=new Date();const localToday=`${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;start.min=localToday;end.min=start.value||localToday;start.addEventListener('change',()=>{end.min=start.value||localToday;if(end.value&&end.value<=start.value)end.value='';availabilityRange=null;});end.addEventListener('change',()=>{availabilityRange=null;});})();
 // Najprv načítaj cloud; až potom sa obnoví administrátorská/zákaznícka obrazovka.
-loadCloudData().then(()=>setInterval(syncCloudChanges,20000)).catch(err=>console.warn('Počiatočné načítanie cloudu zlyhalo:',err));
+loadCloudData().then(()=>{setCloudStatus('ok','Cloud načítaný ✓','Údaje z online úložiska boli načítané.');checkCloudStorage();setInterval(syncCloudChanges,20000)}).catch(err=>{console.warn('Počiatočné načítanie cloudu zlyhalo:',err);setCloudStatus('error','Načítanie cloudu zlyhalo',String(err&&err.message||err))});
+
+async function checkCloudStorage(){
+  setCloudStatus('checking','Overujem online úložisko…','Kontrolujem spojenie s Google Apps Scriptom.');
+  try{
+    const url=GOOGLE_STORAGE_URL+'?action=load&backupKey='+encodeURIComponent(BACKUP_ACCESS_KEY);
+    const data=await loadCloudJsonp(url);
+    if(!data||data.ok===false)throw new Error(data&&data.error?data.error:'Server nevrátil platnú odpoveď.');
+    const payload=data.payload||{};
+    cloudLastSeenAt=data.updatedAt||payload.updatedAt||cloudLastSeenAt;
+    cloudLastVerifiedAt=new Date().toISOString();
+    setCloudStatus('ok','Online úložisko dostupné ✓','Google Apps Script odpovedá. V cloude sú položky: '+CLOUD_KEYS.filter(k=>Object.prototype.hasOwnProperty.call(payload,k)).length+' / '+CLOUD_KEYS.length+'.');
+  }catch(err){
+    console.error('Kontrola cloudového úložiska zlyhala:',err);
+    setCloudStatus('error','Online úložisko nedostupné','Nepodarilo sa načítať cloud. Skontroluj URL nasadenia, prístup „Ktokoľvek“ a nasadenú verziu Apps Scriptu. '+String(err&&err.message||err));
+  }
+}
 
 async function syncCloudChanges(){
   if(cloudPollBusy||document.hidden)return;
