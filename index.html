@@ -106,14 +106,15 @@ const defaultCars=[
 {id:2,name:'BMW X5',category:'SUV',price:99,gear:'Automat',seats:5,fuel:'Diesel',image:'https://images.unsplash.com/photo-1555215695-3004980ad54e?auto=format&fit=crop&w=900&q=80',description:'Prémiové SUV s dostatkom priestoru.'},
 {id:3,name:'Mercedes-Benz E-Class',category:'Luxusná',price:119,gear:'Automat',seats:5,fuel:'Diesel',image:'https://images.unsplash.com/photo-1618843479313-40f8afb4b4d8?auto=format&fit=crop&w=900&q=80',description:'Elegantný komfort na pracovné aj súkromné cesty.'}
 ];
-// Google Apps Script – vzdialené úložisko. Skript musí byť nasadený ako webová aplikácia
-// s prístupom „Ktokoľvek“ a musí podporovať JSON akcie {action:"load",key} a
-// {action:"save",key,value}. Lokálne úložisko zostáva ako záloha pre prípad výpadku.
-const GOOGLE_STORAGE_URL='https://script.google.com/macros/s/AKfycbwFoI7YNaV3A0wYFeAYT7NShGUrlO3IHH-QsNUu1y--vrGKHyfiIborFk6to-5Tym7w/exec';
-const CLOUD_KEYS=['users','cars','bookings','resetRequests','session','contactInfo','priceMode'];
+// Google Apps Script – cloudové úložisko JUT SERVICE.
+// Nasadený Apps Script musí používať rovnaký BACKUP_ACCESS_KEY.
+const GOOGLE_STORAGE_URL='https://script.google.com/macros/s/AKfycbxTRcqQvEws3glSP6Ou3C16pOa0Iw4EOlYXJGeSaFvhndPT2fHlcw_PegehUcrer3ox/exec';
+const BACKUP_ACCESS_KEY='JUTservice_Cloud_2026_K7mP9xR4vN2qL8wT5zB1';
+// Session zostáva lokálna na každom zariadení; nesynchronizujeme prihlásenie medzi počítačmi.
+const CLOUD_KEYS=['users','cars','bookings','resetRequests','contactInfo','priceMode'];
 function load(k,f){try{let x=localStorage.getItem('autopoz_'+k);return x?JSON.parse(x):f}catch(e){return f}}
-// Rýchlejšia synchronizácia: lokálne uloženie je okamžité, cloudové zápisy sa
-// krátko zlučujú podľa kľúča a vzdialené údaje sa načítajú súbežne.
+
+// Uloženie do localStorage je okamžité. Cloudové zápisy sa krátko zlučujú.
 const cloudSaveTimers=Object.create(null);
 const cloudPendingValues=Object.create(null);
 const CLOUD_SAVE_DELAY=250;
@@ -129,25 +130,45 @@ function save(k,v){
     fetch(GOOGLE_STORAGE_URL,{
       method:'POST',mode:'no-cors',redirect:'follow',
       headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body:JSON.stringify({action:'save',key:k,value})
+      body:JSON.stringify({action:'save',backupKey:BACKUP_ACCESS_KEY,key:k,value:value})
     }).catch(err=>console.warn('Cloud uloženie ('+k+') sa nepodarilo:',err));
   },CLOUD_SAVE_DELAY);
 }
+
+// Apps Script JSONP načítanie: funguje aj vtedy, keď prehliadač blokuje CORS.
+function loadCloudJsonp(url){
+  return new Promise((resolve,reject)=>{
+    const callbackName='__jutCloudCallback_'+Date.now()+'_'+Math.random().toString(36).slice(2);
+    const script=document.createElement('script');
+    let finished=false;
+    const cleanup=()=>{
+      if(finished)return;
+      finished=true;
+      try{delete window[callbackName]}catch(e){window[callbackName]=undefined}
+      if(script.parentNode)script.parentNode.removeChild(script);
+      clearTimeout(timer);
+    };
+    const timer=setTimeout(()=>{cleanup();reject(new Error('Vypršal čas načítania cloudu.'))},15000);
+    window[callbackName]=(data)=>{cleanup();resolve(data)};
+    script.onerror=()=>{cleanup();reject(new Error('Cloud server sa nepodarilo načítať.'))};
+    script.src=url+(url.includes('?')?'&':'?')+'callback='+encodeURIComponent(callbackName)+'&_='+Date.now();
+    document.head.appendChild(script);
+  });
+}
+
 async function loadCloudData(){
-  // Nečakáme na každú položku zvlášť; všetky kľúče sa načítajú paralelne.
   await Promise.all(CLOUD_KEYS.map(async k=>{
     try{
-      const response=await fetch(GOOGLE_STORAGE_URL+'?action=load&key='+encodeURIComponent(k),{method:'GET',redirect:'follow',cache:'no-store'});
-      if(!response.ok) return;
-      const data=await response.json();
-      const value=data&&Object.prototype.hasOwnProperty.call(data,'value')?data.value:data;
+      const url=GOOGLE_STORAGE_URL+'?action=load&backupKey='+encodeURIComponent(BACKUP_ACCESS_KEY)+'&key='+encodeURIComponent(k);
+      const data=await loadCloudJsonp(url);
+      if(!data||data.ok===false)throw new Error(data&&data.error?data.error:'Neplatná odpoveď cloudu.');
+      const value=Object.prototype.hasOwnProperty.call(data,'value')?data.value:null;
       if(value===undefined||value===null)return;
       localStorage.setItem('autopoz_'+k,JSON.stringify(value));
       if(k==='users')users=value;
       else if(k==='cars')cars=value;
       else if(k==='bookings')bookings=value;
       else if(k==='resetRequests')resetRequests=value;
-      else if(k==='session')session=value;
       else if(k==='contactInfo')contactInfo=value;
       else if(k==='priceMode')priceMode=value==='with'?'with':'without';
     }catch(err){console.warn('Cloud načítanie ('+k+') sa nepodarilo; používajú sa lokálne dáta.',err)}
