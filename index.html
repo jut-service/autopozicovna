@@ -117,6 +117,7 @@ function load(k,f){try{let x=localStorage.getItem('autopoz_'+k);return x?JSON.pa
 // Uloženie do localStorage je okamžité. Cloudové zápisy sa krátko zlučujú.
 const cloudSaveTimers=Object.create(null);
 const cloudPendingValues=Object.create(null);
+let cloudWritesInFlight=0;
 const CLOUD_SAVE_DELAY=250;
 function save(k,v){
   try{localStorage.setItem('autopoz_'+k,JSON.stringify(v))}catch(e){console.warn('Lokálne úložisko je plné; pokračujem synchronizáciou do cloudu:',e)}
@@ -127,11 +128,13 @@ function save(k,v){
     const value=cloudPendingValues[k];
     delete cloudPendingValues[k];
     delete cloudSaveTimers[k];
+    cloudWritesInFlight++;
     fetch(GOOGLE_STORAGE_URL,{
       method:'POST',mode:'no-cors',redirect:'follow',
       headers:{'Content-Type':'text/plain;charset=utf-8'},
       body:JSON.stringify({action:'save',backupKey:BACKUP_ACCESS_KEY,key:k,value:value})
-    }).catch(err=>console.warn('Cloud uloženie ('+k+') sa nepodarilo:',err));
+    }).catch(err=>console.warn('Cloud uloženie ('+k+') sa nepodarilo:',err))
+      .finally(()=>{cloudWritesInFlight=Math.max(0,cloudWritesInFlight-1)});
   },CLOUD_SAVE_DELAY);
 }
 
@@ -156,12 +159,16 @@ function loadCloudJsonp(url){
   });
 }
 
+let cloudLastSeenAt=null;
+let cloudPollBusy=false;
 async function loadCloudData(){
+  let latestSeen=null;
   await Promise.all(CLOUD_KEYS.map(async k=>{
     try{
       const url=GOOGLE_STORAGE_URL+'?action=load&backupKey='+encodeURIComponent(BACKUP_ACCESS_KEY)+'&key='+encodeURIComponent(k);
       const data=await loadCloudJsonp(url);
       if(!data||data.ok===false)throw new Error(data&&data.error?data.error:'Neplatná odpoveď cloudu.');
+      if(data.updatedAt&&(!latestSeen||data.updatedAt>latestSeen))latestSeen=data.updatedAt;
       const value=Object.prototype.hasOwnProperty.call(data,'value')?data.value:null;
       if(value===undefined||value===null)return;
       localStorage.setItem('autopoz_'+k,JSON.stringify(value));
@@ -173,6 +180,7 @@ async function loadCloudData(){
       else if(k==='priceMode')priceMode=value==='with'?'with':'without';
     }catch(err){console.warn('Cloud načítanie ('+k+') sa nepodarilo; používajú sa lokálne dáta.',err)}
   }));
+  cloudLastSeenAt=latestSeen||cloudLastSeenAt;
   if(!users.some(u=>u.role==='admin'))users.unshift(DEMO_ADMIN);
   users.filter(u=>u.role==='admin'&&u.email===DEMO_ADMIN.email).forEach(u=>u.password='Admin123');
   renderPublicContact();
@@ -226,7 +234,7 @@ function deleteUser(id){if(session?.role!=='admin')return;const u=users.find(x=>
 function fillContactForm(){if(session?.role!=='admin')return;const map={contactPhone:'phone',contactEmail:'email',contactAddress:'address',contactHours:'hours',contactSocial:'social'};for(const [id,key] of Object.entries(map)){const el=document.getElementById(id);if(el)el.value=contactInfo[key]||''}}
 function renderPublicContact(){const el=document.getElementById('publicContact');if(!el)return;const phone=(contactInfo.phone||'').trim(),email=(contactInfo.email||'').trim(),address=(contactInfo.address||'').trim(),hours=(contactInfo.hours||'').trim(),social=(contactInfo.social||'').trim();el.innerHTML=`<div class="feature"><h3>Telefón</h3><p class="muted">${phone?`<a href="tel:${esc(phone)}">${esc(phone)}</a>`:'—'}</p></div><div class="feature"><h3>E-mail</h3><p class="muted">${email?`<a href="mailto:${esc(email)}">${esc(email)}</a>`:'—'}</p></div><div class="feature"><h3>Adresa a otváracie hodiny</h3><p class="muted">${address?esc(address):'—'}${hours?`<br>${esc(hours)}`:''}</p>${social?`<p><a href="${esc(social)}" target="_blank" rel="noopener noreferrer">Sociálna sieť ↗</a></p>`:''}</div>`}
 function saveContact(e){e.preventDefault();if(session?.role!=='admin'){toast('Len administrátor môže meniť kontaktné údaje.');return}contactInfo={phone:document.getElementById('contactPhone').value.trim(),email:document.getElementById('contactEmail').value.trim(),address:document.getElementById('contactAddress').value.trim(),hours:document.getElementById('contactHours').value.trim(),social:document.getElementById('contactSocial').value.trim()};save('contactInfo',contactInfo);renderPublicContact();document.getElementById('contactSaveMessage').textContent=' Kontakty boli uložené.';toast('Kontaktné údaje boli uložené.')}
-function renderAdmin(){if(session?.role!=='admin')return;updatePriceModeUI();save('users',users);save('cars',cars);save('bookings',bookings);fillContactForm();renderPublicContact();document.getElementById('statCars').textContent=cars.length;document.getElementById('statUsers').textContent=users.filter(u=>u.role==='customer').length;document.getElementById('statPending').textContent=users.filter(u=>u.role==='customer'&&u.status==='pending').length;document.getElementById('statBookings').textContent=bookings.length;document.getElementById('vehicleRows').innerHTML=cars.map(c=>`<tr><td><b>${esc(c.name)}</b><br><span class="muted">ŠPZ: ${esc(c.licensePlate||'—')} · ${esc(c.gear)} · ${c.seats} miest</span></td><td>${esc(c.category)}</td><td><b>${c.price} €</b> / deň (${priceVatLabel()})</td><td><span class="car-status ${c.reserved?'service':c.service?'service':'available'}">${c.reserved?'Rezervované':c.service?'V servise':'Dostupné'}</span><br><button class="smallbtn" onclick="toggleCarReserved(${c.id})">${c.reserved?'Označiť dostupné':'Označiť rezervované'}</button><button class="smallbtn" onclick="toggleCarService(${c.id})">${c.service?'Označiť dostupné':'Označiť servis'}</button></td><td><button class="smallbtn" onclick="editCar(${c.id})">Upraviť</button><button class="smallbtn danger" onclick="deleteCar(${c.id})">Vymazať</button></td></tr>`).join('')||'<tr><td colspan="5" class="empty">Zatiaľ nie sú pridané vozidlá.</td></tr>';document.getElementById('userRows').innerHTML=users.filter(u=>u.role==='customer').map(u=>`<tr><td><b>${esc(u.name)}</b></td><td>${esc(u.email)}</td><td>${esc(u.phone||'—')}</td><td><span class="${u.status==='approved'?'good':u.status==='pending'?'pending':'danger'}">${u.status==='approved'?'Schválený':u.status==='pending'?'Čaká na schválenie':'Zamietnutý'}</span></td><td>${u.status==='pending'?`<button class="smallbtn" onclick="userStatus(${u.id},'approved')">Schváliť</button><button class="smallbtn danger" onclick="userStatus(${u.id},'rejected')">Zamietnuť</button>`:`<button class="smallbtn" onclick="userStatus(${u.id},'pending')">Vrátiť na čakanie</button>`}<button class="smallbtn" onclick="adminResetPassword(${u.id})">Zmeniť heslo</button><button class="smallbtn danger" onclick="deleteUser(${u.id})">Vymazať</button></td></tr>`).join('')||'<tr><td colspan="5" class="empty">Zatiaľ žiadne registrácie.</td></tr>';renderBookings();renderCalendar()}
+function renderAdmin(){if(session?.role!=='admin')return;updatePriceModeUI();fillContactForm();renderPublicContact();document.getElementById('statCars').textContent=cars.length;document.getElementById('statUsers').textContent=users.filter(u=>u.role==='customer').length;document.getElementById('statPending').textContent=users.filter(u=>u.role==='customer'&&u.status==='pending').length;document.getElementById('statBookings').textContent=bookings.length;document.getElementById('vehicleRows').innerHTML=cars.map(c=>`<tr><td><b>${esc(c.name)}</b><br><span class="muted">ŠPZ: ${esc(c.licensePlate||'—')} · ${esc(c.gear)} · ${c.seats} miest</span></td><td>${esc(c.category)}</td><td><b>${c.price} €</b> / deň (${priceVatLabel()})</td><td><span class="car-status ${c.reserved?'service':c.service?'service':'available'}">${c.reserved?'Rezervované':c.service?'V servise':'Dostupné'}</span><br><button class="smallbtn" onclick="toggleCarReserved(${c.id})">${c.reserved?'Označiť dostupné':'Označiť rezervované'}</button><button class="smallbtn" onclick="toggleCarService(${c.id})">${c.service?'Označiť dostupné':'Označiť servis'}</button></td><td><button class="smallbtn" onclick="editCar(${c.id})">Upraviť</button><button class="smallbtn danger" onclick="deleteCar(${c.id})">Vymazať</button></td></tr>`).join('')||'<tr><td colspan="5" class="empty">Zatiaľ nie sú pridané vozidlá.</td></tr>';document.getElementById('userRows').innerHTML=users.filter(u=>u.role==='customer').map(u=>`<tr><td><b>${esc(u.name)}</b></td><td>${esc(u.email)}</td><td>${esc(u.phone||'—')}</td><td><span class="${u.status==='approved'?'good':u.status==='pending'?'pending':'danger'}">${u.status==='approved'?'Schválený':u.status==='pending'?'Čaká na schválenie':'Zamietnutý'}</span></td><td>${u.status==='pending'?`<button class="smallbtn" onclick="userStatus(${u.id},'approved')">Schváliť</button><button class="smallbtn danger" onclick="userStatus(${u.id},'rejected')">Zamietnuť</button>`:`<button class="smallbtn" onclick="userStatus(${u.id},'pending')">Vrátiť na čakanie</button>`}<button class="smallbtn" onclick="adminResetPassword(${u.id})">Zmeniť heslo</button><button class="smallbtn danger" onclick="deleteUser(${u.id})">Vymazať</button></td></tr>`).join('')||'<tr><td colspan="5" class="empty">Zatiaľ žiadne registrácie.</td></tr>';renderBookings();renderCalendar()}
 function userStatus(id,status){const u=users.find(x=>x.id===id);if(u){u.status=status;save('users',users);renderAdmin();toast(status==='approved'?'Účet bol schválený.':'Stav účtu bol zmenený.')}} 
 function editCar(id){const c=cars.find(x=>x.id===id);document.getElementById('carForm').reset();document.getElementById('carImagePreview').style.display='none';document.getElementById('carImagePreview').innerHTML='';document.getElementById('carId').value=c?.id||'';document.getElementById('modalTitle').textContent=c?'Upraviť vozidlo':'Pridať vozidlo';updatePriceModeUI();if(c){document.getElementById('carName').value=c.name;document.getElementById('carPlate').value=c.licensePlate||'';document.getElementById('carCategory').value=c.category;document.getElementById('carPrice').value=c.price;document.getElementById('carGear').value=c.gear;document.getElementById('carSeats').value=c.seats;document.getElementById('carFuel').value=c.fuel;document.getElementById('carImage').value=c.image||'';document.getElementById('carDesc').value=c.description||'';document.getElementById('carService').value=c.service?'service':'available';const ims=c.images&&c.images.length?c.images:[c.image].filter(Boolean);if(ims.length){document.getElementById('carImagePreview').innerHTML=ims.map(src=>`<img src="${esc(src)}" alt="Náhľad">`).join('');document.getElementById('carImagePreview').style.display='grid'}}else{document.getElementById('carPrice').value=40;document.getElementById('carSeats').value=5}document.getElementById('modalBg').classList.add('show')}
 function closeModal(){document.getElementById('modalBg').classList.remove('show')}
@@ -255,7 +263,38 @@ document.getElementById('carImageFiles').addEventListener('change',async functio
 document.getElementById('year').textContent=new Date().getFullYear();renderPublicContact();
 // Native date pickers prevent selecting past dates and keep return date after pickup.
 (function setupDatePickers(){const start=document.getElementById('availabilityStart'),end=document.getElementById('availabilityEnd');if(!start||!end)return;const today=new Date();const localToday=`${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;start.min=localToday;end.min=start.value||localToday;start.addEventListener('change',()=>{end.min=start.value||localToday;if(end.value&&end.value<=start.value)end.value='';availabilityRange=null;});end.addEventListener('change',()=>{availabilityRange=null;});})();
-if(session){const u=users.find(x=>x.id===session.id);if(!u||u.status!=='approved'&&u.role!=='admin'){session=null;save('session',null)}else{session={id:u.id,email:u.email,name:u.name,role:u.role,status:u.status};save('session',session);go(u.role==='admin'?'admin':'customer')}}
-loadCloudData();
+// Najprv načítaj cloud; až potom sa obnoví administrátorská/zákaznícka obrazovka.
+loadCloudData().then(()=>setInterval(syncCloudChanges,20000)).catch(err=>console.warn('Počiatočné načítanie cloudu zlyhalo:',err));
+
+async function syncCloudChanges(){
+  if(cloudPollBusy||document.hidden)return;
+  if(cloudWritesInFlight||Object.keys(cloudSaveTimers).length||Object.keys(cloudPendingValues).length)return;
+  cloudPollBusy=true;
+  try{
+    const url=GOOGLE_STORAGE_URL+'?action=load&backupKey='+encodeURIComponent(BACKUP_ACCESS_KEY);
+    const data=await loadCloudJsonp(url);
+    if(!data||data.ok===false||!data.payload)return;
+    const stamp=data.updatedAt||data.payload.updatedAt||null;
+    if(!stamp||stamp===cloudLastSeenAt)return;
+    const payload=data.payload;
+    for(const k of CLOUD_KEYS){
+      if(!Object.prototype.hasOwnProperty.call(payload,k))continue;
+      const value=payload[k];
+      localStorage.setItem('autopoz_'+k,JSON.stringify(value));
+      if(k==='users')users=value;
+      else if(k==='cars')cars=value;
+      else if(k==='bookings')bookings=value;
+      else if(k==='resetRequests')resetRequests=value;
+      else if(k==='contactInfo')contactInfo=value;
+      else if(k==='priceMode')priceMode=value==='with'?'with':'without';
+    }
+    cloudLastSeenAt=stamp;
+    renderPublicContact();
+    if(session?.role==='admin')renderAdmin();
+    else if(session?.role==='customer')renderCustomer();
+    toast('Údaje boli synchronizované z cloudu.');
+  }catch(err){console.warn('Automatická synchronizácia zlyhala:',err)}
+  finally{cloudPollBusy=false}
+}
 </script>
 </body></html>
