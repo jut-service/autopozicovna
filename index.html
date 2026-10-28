@@ -144,6 +144,7 @@ const cloudSaveTimers=Object.create(null);
 const cloudPendingValues=Object.create(null);
 const cloudSaveErrors=Object.create(null);
 let cloudWritesInFlight=0;
+let cloudWriteQueue=Promise.resolve();
 let cloudLastSeenAt=null;
 let cloudLastVerifiedAt=null;
 const CLOUD_SAVE_DELAY=300;
@@ -172,6 +173,11 @@ function save(k,v){
     const value=cloudPendingValues[k];
     delete cloudPendingValues[k];
     delete cloudSaveTimers[k];
+    // Všetky zápisy sa vykonávajú postupne, aby sa navzájom neprepísali.
+    let releaseCloudWrite;
+    const previousCloudWrite=cloudWriteQueue;
+    cloudWriteQueue=new Promise(resolve=>{releaseCloudWrite=resolve});
+    await previousCloudWrite;
     cloudWritesInFlight++; updateCloudPending();
     try{
       await fetch(GOOGLE_STORAGE_URL,{
@@ -202,6 +208,7 @@ function save(k,v){
       console.error('Cloud uloženie ('+k+') nebolo overené:',err);
       setCloudStatus('error','Cloudové uloženie nepotvrdené','Položka „'+k+'“ je zatiaľ len lokálne alebo server neodpovedá. '+cloudSaveErrors[k]);
     }finally{
+      releaseCloudWrite();
       cloudWritesInFlight=Math.max(0,cloudWritesInFlight-1);updateCloudPending();
       if(Object.keys(cloudPendingValues).length===0&&Object.keys(cloudSaveTimers).length===0&&cloudWritesInFlight===0&&Object.keys(cloudSaveErrors).length===0){setCloudStatus('ok','Automaticky uložené ✓','Všetky aktuálne cloudové zápisy sú overené.');}
     }
