@@ -98,7 +98,7 @@ body{background:#e7e7e7;color:#252525}header{background:rgba(231,231,231,.96)}
 <div id="bookingModalBg" class="modalbg" onclick="if(event.target===this)closeBookingModal()"><div class="modal"><h2>Nová rezervácia (admin)</h2><form onsubmit="saveBooking(event)"><div class="field"><label for="bookingUser">Zákazník</label><select id="bookingUser" required></select></div><div class="field"><label for="bookingCar">Vozidlo</label><select id="bookingCar" required></select></div><div class="grid2"><div class="field"><label for="bookingStart">Od</label><input id="bookingStart" type="date" required></div><div class="field"><label for="bookingEnd">Do</label><input id="bookingEnd" type="date" required></div></div><div class="modalactions"><button type="button" class="btn outline" onclick="closeBookingModal()">Zrušiť</button><button class="btn primary" type="submit">Vytvoriť</button></div></form></div></div>
 <div id="toast" class="toast"></div>
 <script>
-const DEMO_ADMIN={name:'Administrátor',email:'admin@autopozicovna.sk',password:'Admin123!',role:'admin',status:'approved'};
+const DEMO_ADMIN={name:'Administrátor',email:'admin@autopozicovna.sk',password:'Admin123',role:'admin',status:'approved'};
 const defaultCars=[
 {id:1,name:'Škoda Octavia',category:'Rodinná',price:39,gear:'Manuál',seats:5,fuel:'Diesel',image:'https://images.unsplash.com/photo-1549317661-bd32c8ce0db2?auto=format&fit=crop&w=900&q=80',description:'Praktické a komfortné vozidlo na každý deň.'},
 {id:2,name:'BMW X5',category:'SUV',price:99,gear:'Automat',seats:5,fuel:'Diesel',image:'https://images.unsplash.com/photo-1555215695-3004980ad54e?auto=format&fit=crop&w=900&q=80',description:'Prémiové SUV s dostatkom priestoru.'},
