@@ -134,6 +134,12 @@ const CLOUD_KEYS=['users','cars','bookings','resetRequests','contactInfo','price
 function load(k,f){try{let x=localStorage.getItem('autopoz_'+k);return x?JSON.parse(x):f}catch(e){return f}}
 
 // Uloženie do localStorage je okamžité. Cloudový zápis sa následne overí spätným načítaním.
+// Porovnávanie JSON-u ignoruje iba poradie kľúčov v objektoch; poradie polí zostáva významné.
+function cloudStableJson(value){
+  if(Array.isArray(value))return '['+value.map(cloudStableJson).join(',')+']';
+  if(value&&typeof value==='object')return '{'+Object.keys(value).sort().map(k=>JSON.stringify(k)+':'+cloudStableJson(value[k])).join(',')+'}';
+  return JSON.stringify(value);
+}
 const cloudSaveTimers=Object.create(null);
 const cloudPendingValues=Object.create(null);
 const cloudSaveErrors=Object.create(null);
@@ -173,12 +179,20 @@ function save(k,v){
         headers:{'Content-Type':'text/plain;charset=utf-8'},
         body:JSON.stringify({action:'save',backupKey:BACKUP_ACCESS_KEY,key:k,value:value})
       });
-      // no-cors skryje odpoveď POST-u, preto overíme výsledok načítaním tej istej položky.
-      await new Promise(resolve=>setTimeout(resolve,900));
+      // no-cors skryje odpoveď POST-u, preto výsledok overujeme spätným načítaním.
+      // Opakujeme načítanie, aby sme obmedzili chyby spôsobené oneskorením cloudu.
       const url=GOOGLE_STORAGE_URL+'?action=load&backupKey='+encodeURIComponent(BACKUP_ACCESS_KEY)+'&key='+encodeURIComponent(k);
-      const data=await loadCloudJsonp(url);
-      if(!data||data.ok===false)throw new Error(data&&data.error?data.error:'Server nevrátil platnú odpoveď.');
-      if(JSON.stringify(data.value)!==JSON.stringify(value))throw new Error('Cloud vrátil inú hodnotu než bola odoslaná. Skontroluj nasadenie Apps Scriptu a jeho kľúč.');
+      let data=null, matched=false, lastReadError='';
+      for(let attempt=0;attempt<4;attempt++){
+        if(attempt>0)await new Promise(resolve=>setTimeout(resolve,700*attempt));
+        try{
+          data=await loadCloudJsonp(url);
+          if(!data||data.ok===false)throw new Error(data&&data.error?data.error:'Server nevrátil platnú odpoveď.');
+          if(cloudStableJson(data.value)===cloudStableJson(value)){matched=true;break;}
+        }catch(readErr){lastReadError=String(readErr&&readErr.message||readErr);}
+      }
+      if(!data||data.ok===false)throw new Error(lastReadError||data&&data.error||'Server nevrátil platnú odpoveď.');
+      if(!matched)throw new Error('Cloud po opakovanom načítaní stále vracia inú hodnotu. Môže ísť o starú verziu Apps Scriptu, inú URL/kľúč alebo súbežnú zmenu z iného počítača.');
       cloudLastSeenAt=data.updatedAt||cloudLastSeenAt;
       cloudLastVerifiedAt=new Date().toISOString();
       delete cloudSaveErrors[k];
