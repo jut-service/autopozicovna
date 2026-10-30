@@ -180,26 +180,32 @@ function save(k,v){
     await previousCloudWrite;
     cloudWritesInFlight++; updateCloudPending();
     try{
+      // POST je v statickom GitHub HTML cross-origin, preto používame no-cors.
+      // Apps Script uloží jedinečné potvrdenie požiadavky do CacheService.
+      // Následné JSONP overenie potvrdí, že práve tento zápis server spracoval;
+      // neporovnávame aktuálny obsah, ktorý už medzitým mohol zmeniť iný počítač.
+      const requestId='jut_'+Date.now()+'_'+Math.random().toString(36).slice(2);
       await fetch(GOOGLE_STORAGE_URL,{
         method:'POST',mode:'no-cors',redirect:'follow',
         headers:{'Content-Type':'text/plain;charset=utf-8'},
-        body:JSON.stringify({action:'save',backupKey:BACKUP_ACCESS_KEY,key:k,value:value})
+        body:JSON.stringify({action:'save',backupKey:BACKUP_ACCESS_KEY,key:k,value:value,requestId:requestId})
       });
-      // no-cors skryje odpoveď POST-u, preto výsledok overujeme spätným načítaním.
-      // Opakujeme načítanie, aby sme obmedzili chyby spôsobené oneskorením cloudu.
-      const url=GOOGLE_STORAGE_URL+'?action=load&backupKey='+encodeURIComponent(BACKUP_ACCESS_KEY)+'&key='+encodeURIComponent(k);
-      let data=null, matched=false, lastReadError='';
-      for(let attempt=0;attempt<4;attempt++){
-        if(attempt>0)await new Promise(resolve=>setTimeout(resolve,700*attempt));
+      const verifyUrl=GOOGLE_STORAGE_URL+'?action=verify&backupKey='+encodeURIComponent(BACKUP_ACCESS_KEY)+'&requestId='+encodeURIComponent(requestId);
+      let receipt=null,lastVerifyError='';
+      for(let attempt=0;attempt<10;attempt++){
+        if(attempt>0)await new Promise(resolve=>setTimeout(resolve,500+attempt*400));
         try{
-          data=await loadCloudJsonp(url);
-          if(!data||data.ok===false)throw new Error(data&&data.error?data.error:'Server nevrátil platnú odpoveď.');
-          if(cloudStableJson(data.value)===cloudStableJson(value)){matched=true;break;}
-        }catch(readErr){lastReadError=String(readErr&&readErr.message||readErr);}
+          const check=await loadCloudJsonp(verifyUrl);
+          if(check&&check.ok&&check.receipt&&check.receipt.ok){receipt=check.receipt;break;}
+          if(check&&check.ok===false&&!check.pending)throw new Error(check.error||'Apps Script odmietol zápis.');
+          lastVerifyError=check&&check.error||'Čakám na potvrdenie zápisu.';
+        }catch(verifyErr){
+          lastVerifyError=String(verifyErr&&verifyErr.message||verifyErr);
+          if(/Neznáma akcia|Neplatný záložný kľúč/.test(lastVerifyError))throw verifyErr;
+        }
       }
-      if(!data||data.ok===false)throw new Error(lastReadError||data&&data.error||'Server nevrátil platnú odpoveď.');
-      if(!matched)throw new Error('Cloud po opakovanom načítaní stále vracia inú hodnotu. Môže ísť o starú verziu Apps Scriptu, inú URL/kľúč alebo súbežnú zmenu z iného počítača.');
-      cloudLastSeenAt=data.updatedAt||cloudLastSeenAt;
+      if(!receipt)throw new Error(lastVerifyError||'Apps Script nepotvrdil spracovanie zápisu. Skontroluj nasadenie novej verzie Apps Scriptu.');
+      cloudLastSeenAt=receipt.updatedAt||cloudLastSeenAt;
       cloudLastVerifiedAt=new Date().toISOString();
       delete cloudSaveErrors[k];
       setCloudStatus('ok','Automaticky uložené ✓','Cloud potvrdil uloženie položky „'+k+'“.');
